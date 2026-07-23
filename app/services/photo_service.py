@@ -1,95 +1,132 @@
-import logging
-from pathlib import PurePosixPath
-from uuid import uuid4
+import hashlib
+import io
+import uuid
 
-from fastapi import UploadFile
-from sqlalchemy.exc import SQLAlchemyError
+import structlog
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.exceptions import (
-    DependencyUnavailableError,
-    FileTooLargeError,
+from app.core.errors import (
+    DuplicatePhotoError,
+    PayloadTooLargeError,
     PhotoNotFoundError,
-    UnsupportedFileTypeError,
+    UnsupportedMediaTypeError,
 )
-from app.db.models import Photo, PhotoStatus
-from app.integrations.minio_storage import MinioStorage
+from app.core.metrics import photos_uploaded_total
+from app.db.models import Photo
+from app.integrations.kafka_producer import KafkaProducerClient
+from app.integrations.storage import StorageClient
 from app.repositories.photo_repository import PhotoRepository
 
+logger = structlog.get_logger(__name__)
 
-logger = logging.getLogger(__name__)
-ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
+_EXTENSION_BY_CONTENT_TYPE = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "image/bmp": "bmp",
+    "image/tiff": "tiff",
+}
 
 
 class PhotoService:
-    def __init__(self, session: AsyncSession, storage: MinioStorage) -> None:
-        self.repository = PhotoRepository(session)
-        self.storage = storage
-        self.settings = get_settings()
+    def __init__(
+        self,
+        session: AsyncSession,
+        storage: StorageClient,
+        kafka_producer: KafkaProducerClient,
+    ) -> None:
+        self._repo = PhotoRepository(session)
+        self._storage = storage
+        self._kafka = kafka_producer
 
-    async def create_photo(self, file: UploadFile, request_id: str) -> Photo:
-        if file.content_type not in ALLOWED_CONTENT_TYPES:
-            raise UnsupportedFileTypeError()
+    async def upload_photo(
+        self,
+        *,
+        filename: str,
+        content_type: str | None,
+        data: bytes,
+        request_id: str,
+    ) -> Photo:
+        settings = get_settings()
 
-        content = await file.read(self.settings.max_file_size_bytes + 1)
-        if len(content) > self.settings.max_file_size_bytes:
-            raise FileTooLargeError()
-        if not content:
-            raise UnsupportedFileTypeError("Файл пустой или повреждён")
+        max_bytes = settings.max_upload_mb * 1024 * 1024
+        if len(data) > max_bytes:
+            raise PayloadTooLargeError(
+                f"File exceeds the {settings.max_upload_mb}MB limit"
+            )
 
-        photo_id = str(uuid4())
-        filename = file.filename or "photo"
-        extension = PurePosixPath(filename).suffix.lower() or ".bin"
-        object_key = f"photos/{photo_id}/original{extension}"
-        photo = Photo(
-            id=photo_id,
-            filename=filename,
-            content_type=file.content_type,
-            size_bytes=len(content),
-            object_key=object_key,
-            status=PhotoStatus.PENDING.value,
-        )
+        if not content_type or not content_type.startswith("image/"):
+            raise UnsupportedMediaTypeError(
+                f"Unsupported content type: {content_type}"
+            )
 
-        await self.storage.put_bytes(object_key, content, file.content_type)
         try:
-            photo = await self.repository.create(photo)
-        except SQLAlchemyError as exc:
-            await self.storage.delete(object_key)
-            raise DependencyUnavailableError("PostgreSQL временно недоступен") from exc
-        except Exception:
-            # Если запись в БД не создалась, не оставляем бесхозный объект.
-            await self.storage.delete(object_key)
+            Image.open(io.BytesIO(data)).verify()
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            raise UnsupportedMediaTypeError(f"File is not a valid image: {exc}") from exc
+
+        sha256 = hashlib.sha256(data).hexdigest()
+
+        existing = await self._repo.get_by_sha256(sha256)
+        if existing is not None:
+            logger.info(
+                "duplicate_upload_by_sha256",
+                photo_id=str(existing.id),
+                request_id=request_id,
+            )
+            return existing
+
+        photo_id = uuid.uuid4()
+        extension = _EXTENSION_BY_CONTENT_TYPE.get(content_type, "bin")
+        object_key = f"photos/{photo_id}/original.{extension}"
+
+        await self._storage.upload(object_key, data, content_type)
+
+        try:
+            photo = await self._repo.create_pending(
+                photo_id=photo_id,
+                object_key=object_key,
+                original_filename=filename,
+                content_type=content_type,
+                sha256=sha256,
+            )
+        except DuplicatePhotoError:
+            # Race: another request inserted the same sha256 first.
+            existing = await self._repo.get_by_sha256(sha256)
+            if existing is not None:
+                return existing
             raise
 
-        logger.info(
-            "photo_created",
-            extra={
-                "event": "photo_created",
-                "request_id": request_id,
-                "photo_id": photo.id,
-                "status": photo.status,
-                "original_filename": photo.filename,
-            },
-        )
+        try:
+            await self._kafka.publish_analysis_requested(
+                photo_id=photo.id, object_key=object_key, trace_id=request_id
+            )
+        except Exception:
+            await self._repo.mark_failed(
+                photo.id,
+                error_code="kafka_publish_failed",
+                error_message="Failed to publish analysis request",
+            )
+            raise
+
+        photos_uploaded_total.inc()
+        logger.info("photo_uploaded", photo_id=str(photo.id), request_id=request_id)
         return photo
 
-    async def list_photos(self) -> list[Photo]:
-        try:
-            return await self.repository.list()
-        except SQLAlchemyError as exc:
-            raise DependencyUnavailableError("PostgreSQL временно недоступен") from exc
-
-    async def get_photo(self, photo_id: str) -> Photo:
-        try:
-            photo = await self.repository.get_by_id(photo_id)
-        except SQLAlchemyError as exc:
-            raise DependencyUnavailableError("PostgreSQL временно недоступен") from exc
+    async def get_photo(self, photo_id: uuid.UUID) -> Photo:
+        photo = await self._repo.get_by_id(photo_id)
         if photo is None:
-            raise PhotoNotFoundError()
+            raise PhotoNotFoundError(f"Photo {photo_id} not found")
         return photo
 
-    async def get_content(self, photo_id: str) -> tuple[Photo, bytes]:
+    async def list_photos(self, *, limit: int, offset: int) -> tuple[list[Photo], int]:
+        return await self._repo.list_photos(limit=limit, offset=offset)
+
+    async def get_photo_content(self, photo_id: uuid.UUID) -> tuple[bytes, str]:
         photo = await self.get_photo(photo_id)
-        content = await self.storage.get_bytes(photo.object_key)
-        return photo, content
+        data = await self._storage.download(photo.object_key)
+        return data, photo.content_type

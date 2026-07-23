@@ -7,14 +7,10 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml ./
 COPY proto ./proto
 COPY app ./app
-COPY migrations ./migrations
-COPY alembic.ini ./alembic.ini
-COPY tests ./tests
-COPY tools ./tools
 
 # Editable install: app/ is imported straight from this directory, so the
 # gRPC stubs generated below are picked up without a separate installed copy.
-RUN uv pip install --system --no-cache -e ".[dev]"
+RUN uv pip install --system --no-cache -e .
 
 # Generate gRPC stubs from the shared proto contract at build time.
 RUN python -m grpc_tools.protoc \
@@ -27,4 +23,4 @@ RUN python -m grpc_tools.protoc \
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "app.worker.main"]

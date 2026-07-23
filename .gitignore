@@ -1,15 +1,11 @@
-.env
-.venv/
-.venv2/
 __pycache__/
-*.py[cod]
+*.pyc
+.venv/
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
 .coverage
 htmlcov/
-dist/
-build/
-*.egg-info/
-*.sqlite3
-alembic/versions/__pycache__/
+
+# Generated at Docker build time / via scripts/gen_proto.sh
+app/generated/analyzer_pb2.py
+app/generated/analyzer_pb2_grpc.py
+app/generated/analyzer_pb2.pyi

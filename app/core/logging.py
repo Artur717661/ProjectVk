@@ -1,30 +1,29 @@
-import json
 import logging
 import sys
-from datetime import datetime, timezone
 
-from app.core.config import get_settings
-
-
-class JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload = {
-            "time": datetime.now(timezone.utc).isoformat(),
-            "level": record.levelname,
-            "event": getattr(record, "event", record.getMessage()),
-            "logger": record.name,
-        }
-        for field in ("request_id", "photo_id", "status", "original_filename", "error_code"):
-            value = getattr(record, field, None)
-            if value is not None:
-                payload[field] = value
-        return json.dumps(payload, ensure_ascii=False)
+import structlog
 
 
-def configure_logging() -> None:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(JsonFormatter())
-    root = logging.getLogger()
-    root.handlers.clear()
-    root.addHandler(handler)
-    root.setLevel(get_settings().log_level.upper())
+def configure_logging(log_level: str = "INFO") -> None:
+    level = getattr(logging, log_level.upper(), logging.INFO)
+
+    logging.basicConfig(
+        format="%(message)s",
+        stream=sys.stdout,
+        level=level,
+    )
+
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+        context_class=dict,
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
