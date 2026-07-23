@@ -5,7 +5,6 @@ from datetime import datetime
 from sqlalchemy import (
     ARRAY,
     Boolean,
-    CheckConstraint,
     DateTime,
     Enum,
     Float,
@@ -44,12 +43,6 @@ class DuplicateGroup(Base):
 
 class Photo(Base):
     __tablename__ = "photos"
-    __table_args__ = (
-        CheckConstraint(
-            "status IN ('pending', 'processing', 'done', 'failed')",
-            name="ck_photos_status",
-        ),
-    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -59,10 +52,12 @@ class Photo(Base):
     original_filename: Mapped[str] = mapped_column(String, nullable=False)
     content_type: Mapped[str] = mapped_column(String, nullable=False)
 
+    # native_enum=False keeps this a VARCHAR guarded by a CHECK constraint, so the
+    # column matches the migration exactly and new statuses don't need an ALTER TYPE.
     status: Mapped[PhotoStatus] = mapped_column(
         Enum(
             PhotoStatus,
-            name="photo_status",
+            name="ck_photos_status",
             native_enum=False,
             validate_strings=True,
             values_callable=lambda enum_cls: [member.value for member in enum_cls],

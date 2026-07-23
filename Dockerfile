@@ -12,18 +12,18 @@ COPY alembic.ini ./alembic.ini
 COPY tests ./tests
 COPY tools ./tools
 
-# Editable install: app/ is imported straight from this directory, so the
-# gRPC stubs generated below are picked up without a separate installed copy.
-RUN uv pip install --system --no-cache -e ".[dev]"
-
-# Generate gRPC stubs from the shared proto contract at build time.
-RUN python -m grpc_tools.protoc \
+# gRPC stubs are generated from the shared contract BEFORE the project is
+# installed, so the installed package already contains them.
+RUN uv pip install --system --no-cache grpcio-tools \
+    && python -m grpc_tools.protoc \
         -I proto \
         --python_out=app/generated \
         --grpc_python_out=app/generated \
         proto/analyzer.proto \
     && sed -i 's/^import analyzer_pb2 as analyzer__pb2/from . import analyzer_pb2 as analyzer__pb2/' \
         app/generated/analyzer_pb2_grpc.py
+
+RUN uv pip install --system --no-cache ".[dev]"
 
 EXPOSE 8000
 

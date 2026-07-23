@@ -73,6 +73,7 @@ docker-compose. Таблица:
 | `LOG_LEVEL` | уровень логирования | `INFO` |
 | `MAX_UPLOAD_MB` | лимит размера загружаемого файла | `20` |
 | `PERCEPTUAL_HASH_HAMMING_THRESHOLD` | порог схожести для дублей | `10` |
+| `WORKER_STALE_PROCESSING_SECONDS` | через сколько «зависшее» в `processing` фото можно переобработать | `300` |
 
 Секретов в коде нет — всё через `.env`.
 
@@ -141,9 +142,15 @@ docker compose run --rm api pytest -v
 docker compose exec postgres psql -U photo -c "CREATE DATABASE photo_test;"
 ```
 
-Покрытие: happy path загрузки, 415/413/404, ретраи gRPC-клиента на
-transient-кодах и их отсутствие на `INVALID_ARGUMENT`, атомарный переход
-`pending → processing`.
+Покрытие:
+
+- загрузка: happy path, идемпотентность по sha256, отдача байтов обратно;
+- отказы валидации: `415` (не изображение, подделанный content-type, SVG),
+  `413` (превышен лимит), `404` (нет такого фото);
+- gRPC-клиент: ретраи на transient-кодах и их отсутствие на `INVALID_ARGUMENT`;
+- репозиторий: атомарный захват `pending → processing`, инкремент `attempts`,
+  переобработка «зависшего» в `processing` фото и защита завершённого от
+  повторного захвата.
 
 ## Миграции
 

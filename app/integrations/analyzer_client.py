@@ -118,13 +118,3 @@ class AnalyzerClient:
             tags=list(response.tags),
             model_version=response.model_version,
         )
-
-
-_analyzer_client: AnalyzerClient | None = None
-
-
-def get_analyzer_client() -> AnalyzerClient:
-    global _analyzer_client
-    if _analyzer_client is None:
-        _analyzer_client = AnalyzerClient()
-    return _analyzer_client

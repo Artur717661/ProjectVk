@@ -56,15 +56,10 @@ class StorageClient:
                 f"Failed to download from MinIO: {exc}"
             ) from exc
         finally:
+            # get_object hands back an aiohttp response whose connection has to be
+            # returned to the pool explicitly, or the pool leaks under load.
             if response is not None:
-                close = getattr(response, "release_conn", None) or getattr(
-                    response, "close", None
-                )
-                if close is not None:
-                    try:
-                        close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                response.close()
 
     async def health_check(self) -> bool:
         try:

@@ -35,9 +35,12 @@ def upgrade() -> None:
         sa.Column("object_key", sa.String(), nullable=False),
         sa.Column("original_filename", sa.String(), nullable=False),
         sa.Column("content_type", sa.String(), nullable=False),
+        # VARCHAR + CHECK rather than a native PG enum: adding a status later is a
+        # constraint change, not an ALTER TYPE. Length matches the longest value
+        # so this is identical to what the ORM model produces.
         sa.Column(
             "status",
-            sa.String(),
+            sa.String(length=10),
             nullable=False,
             server_default="pending",
         ),

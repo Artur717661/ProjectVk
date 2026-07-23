@@ -3,7 +3,7 @@ import io
 import uuid
 
 import structlog
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -21,6 +21,9 @@ from app.repositories.photo_repository import PhotoRepository
 
 logger = structlog.get_logger(__name__)
 
+# Raster formats only, and only ones Pillow can actually decode. Anything outside
+# this map is rejected — that also keeps SVG (which can carry scripts) out of the
+# bucket, since we serve stored bytes back under their own content type.
 _EXTENSION_BY_CONTENT_TYPE = {
     "image/jpeg": "jpg",
     "image/jpg": "jpg",
@@ -30,6 +33,11 @@ _EXTENSION_BY_CONTENT_TYPE = {
     "image/bmp": "bmp",
     "image/tiff": "tiff",
 }
+
+
+def _normalize_content_type(content_type: str | None) -> str:
+    """`image/jpeg; charset=binary` -> `image/jpeg`."""
+    return (content_type or "").split(";", 1)[0].strip().lower()
 
 
 class PhotoService:
@@ -59,14 +67,18 @@ class PhotoService:
                 f"File exceeds the {settings.max_upload_mb}MB limit"
             )
 
-        if not content_type or not content_type.startswith("image/"):
+        media_type = _normalize_content_type(content_type)
+        if media_type not in _EXTENSION_BY_CONTENT_TYPE:
             raise UnsupportedMediaTypeError(
                 f"Unsupported content type: {content_type}"
             )
 
+        # Trust the bytes, not the header: Pillow has to actually recognise the
+        # image. Any decode failure (including decompression bombs) means the
+        # upload is not a usable image, so it maps to 415 rather than a 500.
         try:
             Image.open(io.BytesIO(data)).verify()
-        except (UnidentifiedImageError, OSError, ValueError) as exc:
+        except Exception as exc:  # noqa: BLE001 - any decode failure is a bad upload
             raise UnsupportedMediaTypeError(f"File is not a valid image: {exc}") from exc
 
         sha256 = hashlib.sha256(data).hexdigest()
@@ -81,17 +93,16 @@ class PhotoService:
             return existing
 
         photo_id = uuid.uuid4()
-        extension = _EXTENSION_BY_CONTENT_TYPE.get(content_type, "bin")
-        object_key = f"photos/{photo_id}/original.{extension}"
+        object_key = f"photos/{photo_id}/original.{_EXTENSION_BY_CONTENT_TYPE[media_type]}"
 
-        await self._storage.upload(object_key, data, content_type)
+        await self._storage.upload(object_key, data, media_type)
 
         try:
             photo = await self._repo.create_pending(
                 photo_id=photo_id,
                 object_key=object_key,
                 original_filename=filename,
-                content_type=content_type,
+                content_type=media_type,
                 sha256=sha256,
             )
         except DuplicatePhotoError:

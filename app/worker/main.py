@@ -87,7 +87,9 @@ async def process_message(
 
     structlog.contextvars.bind_contextvars(photo_id=str(photo_id), trace_id=trace_id)
 
-    claimed = await repo.try_mark_processing(photo_id)
+    claimed = await repo.try_mark_processing(
+        photo_id, stale_after_seconds=settings.worker_stale_processing_seconds
+    )
     if not claimed:
         logger.info("worker_skip_already_claimed")
         worker_messages_processed_total.labels(outcome="skipped").inc()

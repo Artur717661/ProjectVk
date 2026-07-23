@@ -23,6 +23,10 @@ class KafkaProducerClient:
         )
         self._started = False
 
+    @property
+    def is_started(self) -> bool:
+        return self._started
+
     async def start(self) -> None:
         if not self._started:
             await self._producer.start()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import structlog
-from fastapi import Request, status
+from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
 logger = structlog.get_logger(__name__)
@@ -90,7 +90,7 @@ def _error_body(request: Request, code: str, message: str) -> dict:
     }
 
 
-def register_exception_handlers(app) -> None:
+def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         logger.warning(

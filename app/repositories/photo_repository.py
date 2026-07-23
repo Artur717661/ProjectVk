@@ -1,6 +1,7 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,11 +62,29 @@ class PhotoRepository:
 
         return list(items_result.scalars().all()), count_result.scalar_one()
 
-    async def try_mark_processing(self, photo_id: uuid.UUID) -> bool:
-        """Atomic pending->processing transition; False means already claimed."""
+    async def try_mark_processing(
+        self, photo_id: uuid.UUID, *, stale_after_seconds: int
+    ) -> bool:
+        """Atomically claim a photo for processing; False means someone else has it.
+
+        A row is claimable when it is still `pending`, or when it has been sitting
+        in `processing` longer than `stale_after_seconds` — that second case
+        recovers photos abandoned by a worker that died mid-flight, which would
+        otherwise stay in `processing` forever.
+        """
+        stale_cutoff = datetime.now(UTC) - timedelta(seconds=stale_after_seconds)
         stmt = (
             update(Photo)
-            .where(Photo.id == photo_id, Photo.status == PhotoStatus.pending)
+            .where(
+                Photo.id == photo_id,
+                or_(
+                    Photo.status == PhotoStatus.pending,
+                    and_(
+                        Photo.status == PhotoStatus.processing,
+                        Photo.updated_at < stale_cutoff,
+                    ),
+                ),
+            )
             .values(status=PhotoStatus.processing, attempts=Photo.attempts + 1)
             .execution_options(synchronize_session=False)
         )

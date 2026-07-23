@@ -45,6 +45,20 @@ register_exception_handlers(app)
 app.include_router(photos_router)
 
 
+def _record_request(request: Request, status_code: int, duration: float) -> None:
+    # Label with the route template ("/v1/photos/{photo_id}"), never the raw URL:
+    # unmatched requests would otherwise blow up metric cardinality.
+    route = request.scope.get("route")
+    path = route.path if route is not None else "unmatched"
+
+    http_requests_total.labels(
+        method=request.method, path=path, status_code=status_code
+    ).inc()
+    http_request_duration_seconds.labels(method=request.method, path=path).observe(
+        duration
+    )
+
+
 @app.middleware("http")
 async def request_context_middleware(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
@@ -54,17 +68,15 @@ async def request_context_middleware(request: Request, call_next):
     structlog.contextvars.bind_contextvars(request_id=request_id)
 
     start = time.perf_counter()
-    response: Response = await call_next(request)
-    duration = time.perf_counter() - start
+    try:
+        response: Response = await call_next(request)
+    except Exception:
+        # The 500 response itself is produced further out by the error handler,
+        # so record the request here or it would be missing from the metrics.
+        _record_request(request, 500, time.perf_counter() - start)
+        raise
 
-    path = request.scope.get("route").path if request.scope.get("route") else request.url.path
-    http_requests_total.labels(
-        method=request.method, path=path, status_code=response.status_code
-    ).inc()
-    http_request_duration_seconds.labels(method=request.method, path=path).observe(
-        duration
-    )
-
+    _record_request(request, response.status_code, time.perf_counter() - start)
     response.headers["X-Request-ID"] = request_id
     return response
 
@@ -88,8 +100,7 @@ async def readyz() -> JSONResponse:
     storage = get_storage_client()
     checks["storage"] = await storage.health_check()
 
-    kafka_producer = get_kafka_producer()
-    checks["kafka"] = kafka_producer._started  # noqa: SLF001
+    checks["kafka"] = get_kafka_producer().is_started
 
     ready = all(checks.values())
     return JSONResponse(

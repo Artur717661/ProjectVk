@@ -28,6 +28,10 @@ class Settings(BaseSettings):
 
     perceptual_hash_hamming_threshold: int = 10
 
+    # How long a photo may stay in `processing` before another worker is allowed
+    # to reclaim it (recovery for a worker that died mid-analysis).
+    worker_stale_processing_seconds: int = 300
+
 
 @lru_cache
 def get_settings() -> Settings:

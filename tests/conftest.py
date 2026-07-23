@@ -34,6 +34,11 @@ class FakeKafkaProducer:
 
     def __init__(self) -> None:
         self.published: list[dict] = []
+        self._started = True
+
+    @property
+    def is_started(self) -> bool:
+        return self._started
 
     async def start(self) -> None:
         pass
@@ -55,8 +60,11 @@ def _test_database_url(app_database_url: str) -> str:
     return f"{base}/photo_test"
 
 
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture
 async def db_engine() -> AsyncGenerator[AsyncEngine, None]:
+    # Function-scoped on purpose: each test gets its own event loop, and an engine
+    # built on a closed loop fails with "Event loop is closed". create_all is a
+    # no-op once the tables exist, so the per-test cost is negligible.
     settings = get_settings()
     engine = create_async_engine(_test_database_url(settings.database_url))
     async with engine.begin() as conn:
