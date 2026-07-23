@@ -1,0 +1,20 @@
+# Опциональный оверрей: поднимает локальный mock-анализатор вместо внешнего
+# gRPC-сервиса. Нужен, когда 45.132.19.101:50051 недоступен (нет сети, сервер
+# лёг) — чтобы полный путь upload → pending → done всё равно отрабатывал.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.mock.yml up -d --build
+#
+services:
+  mock-analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "tools.mock_analyzer"]
+    restart: unless-stopped
+
+  worker:
+    environment:
+      ANALYZER_ADDR: mock-analyzer:50051
+    depends_on:
+      mock-analyzer:
+        condition: service_started
